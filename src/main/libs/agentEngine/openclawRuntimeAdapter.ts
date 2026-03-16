@@ -2253,10 +2253,14 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     const stoppedByError = stopReason === 'error';
     if (stoppedByError) {
       const errorMessage = payload.errorMessage?.trim() || errorMessageFromMessage?.trim() || 'OpenClaw run failed';
+      const erroredSessionKey = turn.sessionKey;
       this.store.updateSession(sessionId, { status: 'error' });
       this.emit('error', sessionId, errorMessage);
       this.cleanupSessionTurn(sessionId);
       this.rejectTurn(sessionId, new Error(errorMessage));
+      // Sync channel history even on error so the UI shows the messages that
+      // were already delivered through the IM connector (e.g. DingTalk reply).
+      this.syncChannelAfterTurn(sessionId, erroredSessionKey);
       return;
     }
 
@@ -2284,7 +2288,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     this.syncChannelAfterTurn(sessionId, abortedSessionKey);
   }
 
-  private handleChatError(sessionId: string, _turn: ActiveTurn, payload: ChatEventPayload): void {
+  private handleChatError(sessionId: string, turn: ActiveTurn, payload: ChatEventPayload): void {
     let errorMessage = payload.errorMessage?.trim() || 'OpenClaw run failed';
 
     // Detect model API errors that are likely caused by unsupported image content
@@ -2293,10 +2297,12 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       errorMessage += '\n\n[Hint: If the model attempted to read an image file, this may be because the model does not support image input. Consider using a vision-capable model or avoid sending image files.]';
     }
 
+    const erroredSessionKey = turn.sessionKey;
     this.store.updateSession(sessionId, { status: 'error' });
     this.emit('error', sessionId, errorMessage);
     this.cleanupSessionTurn(sessionId);
     this.rejectTurn(sessionId, new Error(errorMessage));
+    this.syncChannelAfterTurn(sessionId, erroredSessionKey);
   }
 
   private handleApprovalRequested(payload: unknown): void {
