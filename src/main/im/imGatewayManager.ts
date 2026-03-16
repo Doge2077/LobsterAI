@@ -113,6 +113,10 @@ export class IMGatewayManager extends EventEmitter {
   // NIM probe mutex: serializes concurrent connectivity tests
   private nimProbePromise: Promise<void> | null = null;
 
+  // DingTalk direct HTTP API token cache
+  private dingTalkAccessToken: string | null = null;
+  private dingTalkAccessTokenExpiry = 0;
+
   constructor(db: Database, saveDb: () => void, options?: IMGatewayManagerOptions) {
     super();
 
@@ -1646,22 +1650,19 @@ export class IMGatewayManager extends EventEmitter {
           const target = await this.resolveDingTalkConversationReplyTarget(conversationId)
             ?? this.parseDingTalkConversationTarget(conversationId);
           if (!target) {
-            console.warn(`[IMGatewayManager] Cannot resolve DingTalk target from conversationId: ${conversationId}`);
-            return false;
+            // Fallback: try to extract userId directly from conversationId (raw peerId).
+            const fallbackUserId = conversationId.trim();
+            if (!fallbackUserId) {
+              console.warn(`[IMGatewayManager] Cannot resolve DingTalk target from conversationId: ${conversationId}`);
+              return false;
+            }
+            return this.sendDingTalkDirectHttp(fallbackUserId, text);
           }
-          await this.requestOpenClawGateway('dingtalk-connector.send', {
-            ...(target.accountId ? { accountId: target.accountId } : {}),
-            target: target.target,
-            content: text,
-            useAICard: false,
-            fallbackToNormal: true,
-          });
-          this.cacheConversationReplyRoute('dingtalk', conversationId, {
-            channel: 'dingtalk-connector',
-            to: target.target,
-            ...(target.accountId ? { accountId: target.accountId } : {}),
-          });
-          return true;
+          // Extract userId from target string like "user:0146552636218419"
+          const userId = target.target.startsWith('user:')
+            ? target.target.slice(5)
+            : target.target;
+          return this.sendDingTalkDirectHttp(userId, text);
         }
         case 'nim':
           await this.nimGateway.sendConversationNotification(conversationId, text);
@@ -1678,6 +1679,88 @@ export class IMGatewayManager extends EventEmitter {
     }
   }
 
+  // ─── DingTalk direct HTTP API ──────────────────────────────────────────────
+
+  /**
+   * Obtain a DingTalk access token (v2.0 API), caching it for its lifetime.
+   */
+  private async getDingTalkAccessToken(clientId: string, clientSecret: string): Promise<string> {
+    const now = Date.now();
+    if (this.dingTalkAccessToken && this.dingTalkAccessTokenExpiry > now + 60_000) {
+      return this.dingTalkAccessToken;
+    }
+
+    const resp = await fetchJsonWithTimeout<{
+      accessToken?: string;
+      expireIn?: number;
+    }>('https://api.dingtalk.com/v1.0/oauth2/accessToken', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appKey: clientId, appSecret: clientSecret }),
+    }, 10_000);
+
+    if (!resp.accessToken) {
+      throw new Error('DingTalk accessToken response missing token');
+    }
+
+    this.dingTalkAccessToken = resp.accessToken;
+    this.dingTalkAccessTokenExpiry = now + ((resp.expireIn ?? 7200) * 1000);
+    return this.dingTalkAccessToken;
+  }
+
+  /**
+   * Send a text/markdown message to a DingTalk user via the proactive messaging
+   * HTTP API, bypassing the OpenClaw gateway plugin (which lacks `cfg` context).
+   */
+  private async sendDingTalkDirectHttp(userId: string, text: string): Promise<boolean> {
+    const dtConfig = this.imStore.getDingTalkOpenClawConfig();
+    if (!dtConfig.clientId || !dtConfig.clientSecret) {
+      console.warn('[IMGatewayManager] DingTalk direct send skipped: missing clientId/clientSecret');
+      return false;
+    }
+
+    const token = await this.getDingTalkAccessToken(dtConfig.clientId, dtConfig.clientSecret);
+
+    // Auto-detect markdown vs plain text.
+    const hasMarkdown = /^[#*>\-]|[*_`#\[\]]/.test(text) || text.includes('\n');
+    const msgKey = hasMarkdown ? 'sampleMarkdown' : 'sampleText';
+    const msgParam = hasMarkdown
+      ? { title: text.split('\n')[0].replace(/^[#*\s\->]+/, '').slice(0, 20) || 'Message', text }
+      : { content: text };
+
+    const body = {
+      robotCode: dtConfig.clientId,
+      userIds: [userId],
+      msgKey,
+      msgParam: JSON.stringify(msgParam),
+    };
+
+    console.log('[IMGatewayManager] DingTalk direct HTTP send', JSON.stringify({
+      userId,
+      msgKey,
+      textLength: text.length,
+    }));
+
+    const resp = await fetchJsonWithTimeout<{
+      processQueryKey?: string;
+      message?: string;
+    }>('https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend', {
+      method: 'POST',
+      headers: {
+        'x-acs-dingtalk-access-token': token,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    }, 10_000);
+
+    if (resp.processQueryKey) {
+      console.log(`[IMGatewayManager] DingTalk direct send success: processQueryKey=${resp.processQueryKey}`);
+      return true;
+    }
+
+    console.warn('[IMGatewayManager] DingTalk direct send unexpected response:', JSON.stringify(resp));
+    return false;
+  }
   async primeConversationReplyRoute(
     platform: IMPlatform,
     conversationId: string,
@@ -1690,20 +1773,37 @@ export class IMGatewayManager extends EventEmitter {
     try {
       const lookup = await this.lookupDingTalkConversationReplyRoute(conversationId, coworkSessionId);
       const resolved = lookup?.resolved;
-      if (!resolved) {
+      if (resolved) {
+        this.cacheConversationReplyRoute('dingtalk', conversationId, resolved.route);
+        const sendParams = buildDingTalkSendParamsFromRoute(resolved.route);
+        console.log('[IMGatewayManager] Primed DingTalk reply route', JSON.stringify({
+          conversationId,
+          coworkSessionId: lookup.coworkSessionId,
+          sessionKey: resolved.sessionKey,
+          channel: resolved.route.channel,
+          target: sendParams?.target ?? resolved.route.to,
+          accountId: sendParams?.accountId ?? resolved.route.accountId ?? null,
+        }));
         return;
       }
 
-      this.cacheConversationReplyRoute('dingtalk', conversationId, resolved.route);
-      const sendParams = buildDingTalkSendParamsFromRoute(resolved.route);
-      console.log('[IMGatewayManager] Primed DingTalk reply route', JSON.stringify({
-        conversationId,
-        coworkSessionId: lookup.coworkSessionId,
-        sessionKey: resolved.sessionKey,
-        channel: resolved.route.channel,
-        target: sendParams?.target ?? resolved.route.to,
-        accountId: sendParams?.accountId ?? resolved.route.accountId ?? null,
-      }));
+      // Fallback: construct route from session key JSON context.
+      // When the OpenClaw session lacks deliveryContext (e.g. cron-triggered runs),
+      // the session key itself may embed a JSON SessionContext with all needed info.
+      const fallbackRoute = this.buildDingTalkRouteFromSessionKeys(
+        lookup?.candidateSessionKeys ?? [],
+      );
+      if (fallbackRoute) {
+        this.cacheConversationReplyRoute('dingtalk', conversationId, fallbackRoute.route);
+        console.log('[IMGatewayManager] Primed DingTalk reply route from session key context', JSON.stringify({
+          conversationId,
+          coworkSessionId,
+          sessionKey: fallbackRoute.sessionKey,
+          channel: fallbackRoute.route.channel,
+          target: fallbackRoute.route.to,
+          accountId: fallbackRoute.route.accountId ?? null,
+        }));
+      }
     } catch (error: any) {
       console.warn(
         `[IMGatewayManager] Failed to prime DingTalk reply route for ${conversationId}:`,
@@ -1748,6 +1848,26 @@ export class IMGatewayManager extends EventEmitter {
             accountId: cachedSendParams.accountId ?? null,
           }));
           return cachedSendParams;
+        }
+      }
+
+      // Fallback: construct route from session key JSON context when OpenClaw
+      // session lacks deliveryContext (common for cron-triggered runs).
+      const fallbackRoute = this.buildDingTalkRouteFromSessionKeys(
+        lookup?.candidateSessionKeys ?? [],
+      );
+      if (fallbackRoute) {
+        this.cacheConversationReplyRoute('dingtalk', conversationId, fallbackRoute.route);
+        const fallbackSendParams = buildDingTalkSendParamsFromRoute(fallbackRoute.route);
+        if (fallbackSendParams) {
+          console.log('[IMGatewayManager] Resolved DingTalk reply route from session key context', JSON.stringify({
+            conversationId,
+            sessionKey: fallbackRoute.sessionKey,
+            channel: fallbackRoute.route.channel,
+            target: fallbackSendParams.target,
+            accountId: fallbackSendParams.accountId ?? null,
+          }));
+          return fallbackSendParams;
         }
       }
 
@@ -1859,24 +1979,19 @@ export class IMGatewayManager extends EventEmitter {
       return null;
     }
 
-    let accountId = parts[0]?.trim();
+    const accountId = parts[0]?.trim();
     if (!accountId) {
       return null;
     }
 
-    // The dingtalk-connector plugin uses "__default__" as the internal account
-    // alias in conversationIds.  The send API expects the actual clientId, so
-    // resolve the alias from the persisted DingTalk config.
-    if (accountId === '__default__') {
-      const dtConfig = this.imStore.getDingTalkOpenClawConfig();
-      if (dtConfig.clientId) {
-        accountId = dtConfig.clientId;
-      }
-    }
+    // The dingtalk-connector plugin uses "__default__" as an internal account
+    // lookup key.  The send API expects this key (or undefined for default),
+    // NOT the actual clientId.  Omit it so the plugin uses its default account.
+    const resolvedAccountId = accountId === '__default__' ? undefined : accountId;
 
     if ((parts[1] === 'user' || parts[1] === 'group') && parts[2]) {
       return {
-        accountId,
+        accountId: resolvedAccountId,
         target: `${parts[1]}:${parts.slice(2).join(':')}`,
       };
     }
@@ -1887,9 +2002,73 @@ export class IMGatewayManager extends EventEmitter {
     }
 
     return {
-      accountId,
+      accountId: resolvedAccountId,
       target: `user:${senderId}`,
     };
+  }
+
+  /**
+   * Attempt to construct a DingTalk delivery route by parsing JSON SessionContext
+   * embedded in OpenClaw session keys.  This covers the case where the OpenClaw
+   * session entry itself lacks a deliveryContext (e.g. cron-triggered runs that
+   * reuse an existing session without full delivery metadata).
+   *
+   * Session key format (since dingtalk-connector v0.7.5):
+   *   agent:{agentId}:openai-user:{"channel":"dingtalk-connector","accountid":"...","chattype":"direct","peerid":"...","sendername":"..."}
+   */
+  private buildDingTalkRouteFromSessionKeys(
+    sessionKeys: string[],
+  ): { sessionKey: string; route: OpenClawDeliveryRoute } | null {
+    for (const sessionKey of sessionKeys) {
+      const jsonIdx = sessionKey.indexOf(':{');
+      if (jsonIdx < 0) {
+        continue;
+      }
+      const jsonStr = sessionKey.slice(jsonIdx + 1);
+      let ctx: Record<string, unknown>;
+      try {
+        ctx = JSON.parse(jsonStr);
+      } catch {
+        continue;
+      }
+      if (!ctx || typeof ctx.channel !== 'string') {
+        continue;
+      }
+      const channel = (ctx.channel as string).trim().toLowerCase();
+      if (channel !== 'dingtalk-connector' && channel !== 'dingtalk') {
+        continue;
+      }
+
+      // Determine the target address from the session context.
+      const chatType = typeof ctx.chattype === 'string' ? ctx.chattype : 'direct';
+      const peerId = typeof ctx.peerid === 'string' ? (ctx.peerid as string).trim() : '';
+      const ctxConversationId = typeof ctx.conversationid === 'string' ? (ctx.conversationid as string).trim() : '';
+      if (!peerId && !ctxConversationId) {
+        continue;
+      }
+
+      const to = chatType === 'group'
+        ? `group:${ctxConversationId || peerId}`
+        : `user:${peerId || ctxConversationId}`;
+
+      // Keep the original accountId from the session context (e.g. '__default__').
+      // The dingtalk-connector plugin uses this as an account lookup key, NOT the clientId.
+      // When accountId is '__default__', omit it so the plugin uses its default account.
+      let accountId = typeof ctx.accountid === 'string' ? (ctx.accountid as string).trim() : undefined;
+      if (!accountId || accountId === '__default__') {
+        accountId = undefined;
+      }
+
+      return {
+        sessionKey,
+        route: {
+          channel: 'dingtalk-connector',
+          to,
+          ...(accountId ? { accountId } : {}),
+        },
+      };
+    }
+    return null;
   }
 
   private async requestOpenClawGateway<T = Record<string, unknown>>(

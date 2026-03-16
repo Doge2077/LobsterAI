@@ -12,7 +12,7 @@ import type { CoworkStore, CoworkMessage } from '../coworkStore';
 import type { IMStore } from './imStore';
 import type { IMMessage, IMPlatform, IMMediaAttachment, IMSessionMapping } from './types';
 import { buildIMMediaInstruction } from './imMediaInstruction';
-import { analyzeIMReply } from './imReplyGuard';
+import { analyzeIMReply, DEFAULT_IM_EMPTY_REPLY } from './imReplyGuard';
 import {
   isReminderSystemTurn,
   type IMScheduledTaskCreationResult,
@@ -821,7 +821,12 @@ export class IMCoworkHandler extends EventEmitter {
       return;
     }
 
-    const replyText = this.formatReply(sessionId, accumulator.messages);
+    // For cron-triggered background deliveries (scheduled task executions),
+    // skip the reminder guard — the assistant text IS the scheduled reminder
+    // itself, not a promise to create one.
+    const replyText = accumulator.backgroundDelivery
+      ? this.formatReplyRaw(accumulator.messages)
+      : this.formatReply(sessionId, accumulator.messages);
 
     console.log(`[IMCoworkHandler] 会话完成:`, JSON.stringify({
       sessionId,
@@ -885,6 +890,22 @@ export class IMCoworkHandler extends EventEmitter {
       clearTimeout(accumulator.timeoutId);
     }
     this.messageAccumulators.delete(sessionId);
+  }
+
+  /**
+   * Extract raw assistant text from accumulated messages, bypassing the
+   * reminder-commitment guard.  Used for cron-triggered background deliveries
+   * where the reply IS the scheduled reminder, not a promise to create one.
+   */
+  private formatReplyRaw(messages: CoworkMessage[]): string {
+    const parts: string[] = [];
+    for (const message of messages) {
+      if (message.type === 'assistant' && message.content && !message.metadata?.isThinking) {
+        const text = message.content.trim();
+        if (text) parts.push(text);
+      }
+    }
+    return parts.join('\n\n') || DEFAULT_IM_EMPTY_REPLY;
   }
 
   /**
