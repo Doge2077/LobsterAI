@@ -599,6 +599,7 @@ interface WecomConfig {
 
 interface PopoOpenClawConfig {
   enabled: boolean;
+  connectionMode: 'websocket' | 'webhook';
   appKey: string;
   appSecret: string;
   token: string;

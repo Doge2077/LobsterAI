@@ -493,7 +493,7 @@ export class IMGatewayManager extends EventEmitter {
         lastOutboundAt: null as number | null,
       },
       popo: {
-        connected: Boolean(config.popo?.enabled && config.popo.appKey && config.popo.appSecret && config.popo.token && config.popo.aesKey),
+        connected: Boolean(config.popo?.enabled && config.popo.appKey && config.popo.appSecret && config.popo.aesKey && (config.popo.connectionMode === 'websocket' || config.popo.token)),
         startedAt: null as number | null,
         lastError: null as string | null,
         lastInboundAt: null as number | null,
@@ -847,7 +847,7 @@ export class IMGatewayManager extends EventEmitter {
     if (config.wecom?.enabled && config.wecom?.botId && config.wecom?.secret) {
       openClawPlatformsToStart.push('wecom');
     }
-    if (config.popo?.enabled && config.popo?.appKey && config.popo?.appSecret && config.popo?.token && config.popo?.aesKey) {
+    if (config.popo?.enabled && config.popo?.appKey && config.popo?.appSecret && config.popo?.aesKey && (config.popo.connectionMode === 'websocket' || config.popo.token)) {
       openClawPlatformsToStart.push('popo');
     }
     if (config.nim?.enabled && config.nim.appKey && config.nim.account && config.nim.token) {
@@ -912,7 +912,7 @@ export class IMGatewayManager extends EventEmitter {
     if (platform === 'popo') {
       // POPO runs via OpenClaw; consider it connected when enabled and configured
       const config = this.getConfig();
-      return Boolean(config.popo?.enabled && config.popo.appKey && config.popo.appSecret && config.popo.token && config.popo.aesKey);
+      return Boolean(config.popo?.enabled && config.popo.appKey && config.popo.appSecret && config.popo.aesKey && (config.popo.connectionMode === 'websocket' || config.popo.token));
     }
     return false;
   }

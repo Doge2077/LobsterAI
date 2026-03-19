@@ -639,7 +639,11 @@ const IMSettings: React.FC = () => {
       return !!(wecomOpenClawConfig.botId && wecomOpenClawConfig.secret);
     }
     if (platform === 'popo') {
-      return !!(config.popo.appKey && config.popo.appSecret && config.popo.token && config.popo.aesKey);
+      const effectiveMode = config.popo.connectionMode || (config.popo.token ? 'webhook' : 'websocket');
+      if (effectiveMode === 'webhook') {
+        return !!(config.popo.appKey && config.popo.appSecret && config.popo.token && config.popo.aesKey);
+      }
+      return !!(config.popo.appKey && config.popo.appSecret && config.popo.aesKey);
     }
     return !!(config.feishu.appId && config.feishu.appSecret);
   };
@@ -3010,6 +3014,25 @@ const IMSettings: React.FC = () => {
               guideUrl={IM_GUIDE_URLS.popo}
             />
 
+            {/* Connection Mode selector */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('imPopoConnectionMode')}
+              </label>
+              <select
+                value={popoConfig.connectionMode || (popoConfig.token ? 'webhook' : 'websocket')}
+                onChange={(e) => {
+                  const update = { connectionMode: e.target.value as PopoOpenClawConfig['connectionMode'] };
+                  handlePopoChange(update);
+                  void handleSavePopoConfig(update);
+                }}
+                className="block w-full rounded-lg dark:bg-claude-darkSurface/80 bg-claude-surface/80 dark:border-claude-darkBorder/60 border-claude-border/60 border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors"
+              >
+                <option value="websocket">{i18nService.t('imPopoConnectionModeWebsocket')}</option>
+                <option value="webhook">{i18nService.t('imPopoConnectionModeWebhook')}</option>
+              </select>
+            </div>
+
             {/* Credential hint */}
             <p className="text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary">
               {i18nService.t('imPopoCredentialHint')}
@@ -3083,7 +3106,8 @@ const IMSettings: React.FC = () => {
               </div>
             </div>
 
-            {/* Token input */}
+            {/* Token input (webhook mode only) */}
+            {(popoConfig.connectionMode || (popoConfig.token ? 'webhook' : 'websocket')) === 'webhook' && (
             <div className="space-y-1.5">
               <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">Token</label>
               <div className="relative">
@@ -3120,6 +3144,7 @@ const IMSettings: React.FC = () => {
                 </div>
               </div>
             </div>
+            )}
 
             {/* AES Key input */}
             <div className="space-y-1.5">
@@ -3168,6 +3193,9 @@ const IMSettings: React.FC = () => {
                 {i18nService.t('imAdvancedSettings')}
               </summary>
               <div className="mt-2 space-y-3 pl-2 border-l-2 border-claude-border/30 dark:border-claude-darkBorder/30">
+                {/* Webhook fields (webhook mode only) */}
+                {(popoConfig.connectionMode || (popoConfig.token ? 'webhook' : 'websocket')) === 'webhook' && (
+                <>
                 {/* Webhook Base URL */}
                 <div className="space-y-1.5">
                   <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">Webhook Base URL</label>
@@ -3206,6 +3234,8 @@ const IMSettings: React.FC = () => {
                     className="block w-full rounded-lg dark:bg-claude-darkSurface/80 bg-claude-surface/80 dark:border-claude-darkBorder/60 border-claude-border/60 border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors"
                   />
                 </div>
+                </>
+                )}
 
                 {/* DM Policy */}
                 <div className="space-y-1.5">
