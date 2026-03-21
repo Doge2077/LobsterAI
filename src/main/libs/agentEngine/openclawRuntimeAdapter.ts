@@ -2144,6 +2144,13 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       return;
     }
 
+    console.debug('[Debug:splitBeforeTool] assistantMessageId:', turn.assistantMessageId,
+      'currentText.length:', turn.currentText.length,
+      'committedAssistantText.length:', turn.committedAssistantText.length,
+      'currentAssistantSegmentText.length:', turn.currentAssistantSegmentText.length,
+      'currentText:', turn.currentText.slice(0, 100),
+      'pendingTimer:', this.pendingMessageUpdateTimer.has(turn.assistantMessageId));
+
     const segmentText = turn.currentAssistantSegmentText.trim();
     if (segmentText) {
       const committedCandidate = `${turn.committedAssistantText}${segmentText}`;
@@ -2160,7 +2167,8 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       }
     }
 
-    turn.assistantMessageId = null;
+    // Keep assistantMessageId so subsequent text appends to the same message
+    // instead of creating a new fragmented message after each tool_use block
     turn.currentAssistantSegmentText = '';
   }
 
@@ -2202,6 +2210,7 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     if (segmentText === previousSegmentText && streamedText === previousText) return;
 
     if (!turn.assistantMessageId) {
+      console.debug('[Debug:handleChatDelta] CREATE assistant msg, segmentText.length:', segmentText.length, 'text:', segmentText.slice(0, 60));
       const assistantMessage = this.store.addMessage(sessionId, {
         type: 'assistant',
         content: segmentText,
@@ -2217,15 +2226,23 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     }
 
     if (turn.assistantMessageId && segmentText !== previousSegmentText) {
+      // Send full accumulated text so the message contains the complete assistant
+      // response, not just the latest fragment after the last tool_use block.
+      // streamedText is the raw full text from OpenClaw; committed + segment
+      // reconstructs the same thing, so we use streamedText directly.
+      const fullContent = turn.committedAssistantText
+        ? streamedText.trim()
+        : segmentText;
+      console.debug('[Debug:handleChatDelta] UPDATE assistant msg, fullContent.length:', fullContent.length, 'committed.length:', turn.committedAssistantText.length, 'text:', fullContent.slice(0, 60));
       this.store.updateMessage(sessionId, turn.assistantMessageId, {
-        content: segmentText,
+        content: fullContent,
         metadata: {
           isStreaming: true,
           isFinal: false,
         },
       });
       turn.currentAssistantSegmentText = segmentText;
-      this.throttledEmitMessageUpdate(sessionId, turn.assistantMessageId, segmentText);
+      this.throttledEmitMessageUpdate(sessionId, turn.assistantMessageId, fullContent);
     }
   }
 
@@ -2244,15 +2261,21 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
     if (turn.assistantMessageId) {
       const persistedSegmentText = finalSegmentText || previousSegmentText;
       if (persistedSegmentText) {
+        // Send full accumulated text for the final message.
+        // Fall back to persistedSegmentText when finalText is empty (e.g. final
+        // event contains only tool_use blocks with no text).
+        const fullContent = turn.committedAssistantText
+          ? ((finalText || '').trim() || persistedSegmentText)
+          : persistedSegmentText;
         this.store.updateMessage(sessionId, turn.assistantMessageId, {
-          content: persistedSegmentText,
+          content: fullContent,
           metadata: {
             isStreaming: false,
             isFinal: true,
           },
         });
         if (persistedSegmentText !== previousSegmentText) {
-          this.emit('messageUpdate', sessionId, turn.assistantMessageId, persistedSegmentText);
+          this.emit('messageUpdate', sessionId, turn.assistantMessageId, fullContent);
         }
       }
     } else if (finalSegmentText) {
@@ -2642,18 +2665,24 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       const session = this.store.getSession(sessionId);
       const currentMessage = session?.messages.find((message) => message.id === turn.assistantMessageId);
       const currentText = currentMessage?.content.trim() ?? '';
-      if (canonicalSegmentText === currentText) {
+      // Use full accumulated text (canonicalText) when committed text exists,
+      // to stay consistent with handleChatDelta/handleChatFinal which store
+      // the complete assistant response in a single message.
+      const persistContent = turn.committedAssistantText
+        ? (canonicalText.trim() || canonicalSegmentText)
+        : canonicalSegmentText;
+      if (persistContent === currentText) {
         return;
       }
 
       this.store.updateMessage(sessionId, turn.assistantMessageId, {
-        content: canonicalSegmentText,
+        content: persistContent,
         metadata: {
           isStreaming: false,
           isFinal: true,
         },
       });
-      this.emit('messageUpdate', sessionId, turn.assistantMessageId, canonicalSegmentText);
+      this.emit('messageUpdate', sessionId, turn.assistantMessageId, persistContent);
     } catch (error) {
       console.warn('[OpenClawRuntime] chat.history sync after final failed:', error);
     }

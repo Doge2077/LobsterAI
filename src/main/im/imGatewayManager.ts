@@ -38,7 +38,6 @@ import type { Database } from 'sql.js';
 import type { CoworkRuntime } from '../libs/agentEngine/types';
 import type { CoworkStore } from '../coworkStore';
 import { classifyErrorKey } from '../../common/coworkErrorClassify';
-import { t } from '../i18n';
 const CONNECTIVITY_TIMEOUT_MS = 10_000;
 const INBOUND_ACTIVITY_WARN_AFTER_MS = 2 * 60 * 1000;
 
