@@ -1624,7 +1624,6 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
   }
 
   private handleGatewayEvent(event: GatewayEventFrame): void {
-
     if (event.event === 'tick') {
       this.lastTickTimestamp = Date.now();
       return;
@@ -1650,6 +1649,10 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
 
     if (event.event === 'exec.approval.resolved') {
       this.handleApprovalResolved(event.payload);
+    }
+
+    if (event.event === 'cron') {
+      console.debug('[OpenClawRuntime] received cron event:', JSON.stringify(event));
     }
   }
 

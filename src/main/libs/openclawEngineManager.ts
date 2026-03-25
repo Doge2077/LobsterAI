@@ -7,7 +7,6 @@ import net from 'net';
 import path from 'path';
 import { getElectronNodeRuntimePath, ensureElectronNodeShim } from './coworkUtil';
 import { syncLocalOpenClawExtensionsIntoRuntime } from './openclawLocalExtensions';
-import { applyBundledOpenClawRuntimeHotfixes } from './openclawRuntimeHotfix';
 import { appendPythonRuntimeToEnv } from './pythonRuntime';
 import { isSystemProxyEnabled, resolveSystemProxyUrl } from './systemProxy';
 
@@ -358,19 +357,6 @@ export class OpenClawEngineManager extends EventEmitter {
 
     this.ensureBareEntryFiles(runtime.root);
     console.log(`[OpenClaw] startGateway: ensureBareEntryFiles done (${elapsed()})`);
-    // Skip hotfixes when gateway-bundle.mjs exists. The hotfixes patch individual
-    // JS files in dist/, but the bundle is a single esbuild artifact that doesn't
-    // use those files. Applying hotfixes with bundle present is wasteful (Electron's
-    // transparent asar read causes walkJsFiles to scan ~1100 files inside gateway.asar)
-    // and can take 250+ seconds on Windows due to Defender scanning.
-    const bundlePath = path.join(runtime.root, 'gateway-bundle.mjs');
-    if (fs.existsSync(bundlePath)) {
-      console.log(`[OpenClaw] startGateway: skipping applyRuntimeHotfixes (bundle exists) (${elapsed()})`);
-    } else {
-      this.applyRuntimeHotfixes(runtime.root);
-      console.log(`[OpenClaw] startGateway: applyRuntimeHotfixes done (${elapsed()})`);
-    }
-
     const openclawEntry = this.resolveOpenClawEntry(runtime.root);
     console.log(`[OpenClaw] startGateway: resolveOpenClawEntry done (${elapsed()}), entry=${openclawEntry}`);
     if (!openclawEntry) {
@@ -677,20 +663,6 @@ export class OpenClawEngineManager extends EventEmitter {
       console.log('[OpenClaw] Extracted dist/control-ui/');
     } catch (err) {
       console.error('[OpenClaw] Failed to extract dist/control-ui/ from gateway.asar:', err);
-    }
-  }
-
-  private applyRuntimeHotfixes(runtimeRoot: string): void {
-    const result = applyBundledOpenClawRuntimeHotfixes(runtimeRoot);
-    if (result.changed) {
-      console.log(
-        `[OpenClaw] Applied runtime hotfixes: ${result.patchedFiles
-          .map((filePath) => path.relative(runtimeRoot, filePath))
-          .join(', ')}`,
-      );
-    }
-    if (result.errors.length > 0) {
-      console.warn('[OpenClaw] Runtime hotfix warnings:', result.errors.join(' | '));
     }
   }
 
