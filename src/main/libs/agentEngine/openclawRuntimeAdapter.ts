@@ -2479,7 +2479,9 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
 
     // Detect model API errors that are likely caused by unsupported image content
     // in tool results (e.g., Read tool returning image blocks for non-vision models).
-    if (/^4\d{2}\b/.test(errorMessage)) {
+    // Only match 400 Bad Request — other 4xx codes (403 forbidden, 429 rate limit, etc.)
+    // have unrelated causes and should show their original error message.
+    if (/^400\b/.test(errorMessage)) {
       errorMessage += '\n\n[Hint: If the model attempted to read an image file, this may be because the model does not support image input. Consider using a vision-capable model or avoid sending image files.]';
     }
 
