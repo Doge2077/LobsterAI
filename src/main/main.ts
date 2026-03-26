@@ -696,14 +696,41 @@ const bootstrapOpenClawEngine = async (options: { forceReinstall?: boolean; reas
   return promise;
 };
 
+// Module-level handle so ensureOpenClawRunningForCowork can await any in-flight
+// proactive token refresh before syncing config to the gateway.
+let pendingTokenRefresh: Promise<string | null> | null = null;
+
 const ensureOpenClawRunningForCowork = async () => {
   const manager = getOpenClawEngineManager();
   const status = manager.getStatus();
   if (status.phase === 'running') {
-    return status;
+    // If the gateway is already running but a token refresh is in flight,
+    // wait for it and then re-sync secret env vars so the gateway gets
+    // the fresh token on its next restart (or immediately if we detect a change).
+    if (pendingTokenRefresh) {
+      console.log('[OpenClaw] ensureRunning: awaiting pending token refresh before proceeding');
+      await pendingTokenRefresh.catch(() => {});
+      // After refresh, update gateway secret env vars in case the token changed.
+      const nextEnv = getOpenClawConfigSync().collectSecretEnvVars();
+      const prevEnv = getOpenClawEngineManager().getSecretEnvVars();
+      if (JSON.stringify(nextEnv) !== JSON.stringify(prevEnv)) {
+        console.log('[OpenClaw] ensureRunning: token changed during pending refresh, syncing config');
+        getOpenClawEngineManager().setSecretEnvVars(nextEnv);
+        // Gateway env vars are fixed at spawn; must restart to pick up new token.
+        await syncOpenClawConfig({ reason: 'token-refresh:ensureRunning', restartGatewayIfRunning: true });
+      }
+    }
+    return manager.getStatus();
   }
   if (status.phase === 'starting') {
     return status;
+  }
+
+  // Wait for any in-flight token refresh so that the gateway starts with
+  // a fresh token rather than the stale one that triggered the refresh.
+  if (pendingTokenRefresh) {
+    console.log('[OpenClaw] ensureRunning: awaiting pending token refresh before gateway start');
+    await pendingTokenRefresh.catch(() => {});
   }
 
   // Ensure MCP bridge is started and config is synced before launching the gateway,
@@ -4242,13 +4269,19 @@ if (!gotTheLock) {
     // The getter proactively triggers a background token refresh when the
     // accessToken is within 5 minutes of expiry, so that the SDK always
     // gets a fresh token without blocking.
-    let refreshPromise: Promise<void> | null = null;
-    const refreshTokenAsync = async () => {
-      if (refreshPromise) return;
-      refreshPromise = (async () => {
+    //
+    // refreshOnce() is the single entry-point for all token refresh paths
+    // (proactive, proxy 401/403 retry). It deduplicates concurrent calls via
+    // pendingTokenRefresh so that rolling refresh tokens are never consumed twice.
+    const refreshOnce = async (reason: string): Promise<string | null> => {
+      if (pendingTokenRefresh) {
+        return pendingTokenRefresh;
+      }
+      let resolvedToken: string | null = null;
+      pendingTokenRefresh = (async () => {
         try {
           const tokens = getAuthTokens();
-          if (!tokens?.refreshToken) return;
+          if (!tokens?.refreshToken) return null;
           const serverBaseUrl = getServerApiBaseUrl();
           const resp = await net.fetch(`${serverBaseUrl}/api/auth/refresh`, {
             method: 'POST',
@@ -4259,15 +4292,23 @@ if (!gotTheLock) {
             const body = await resp.json() as { code: number; data: { accessToken: string; refreshToken?: string } };
             if (body.code === 0 && body.data) {
               saveAuthTokens(body.data.accessToken, body.data.refreshToken || tokens.refreshToken);
-              console.log('[Auth] proactive token refresh succeeded');
+              console.log(`[Auth] token refresh succeeded (reason: ${reason})`);
+              resolvedToken = body.data.accessToken;
+              // Sync the fresh token to the OpenClaw gateway so it doesn't
+              // continue using the expired token from its spawn-time env vars.
+              syncOpenClawConfig({ reason: `token-refresh:${reason}`, restartGatewayIfRunning: true }).catch((err) => {
+                console.warn('[Auth] post-refresh OpenClaw config sync failed:', err);
+              });
             }
           }
         } catch (err) {
-          console.warn('[Auth] proactive token refresh failed:', err);
+          console.warn(`[Auth] token refresh failed (reason: ${reason}):`, err);
         } finally {
-          refreshPromise = null;
+          pendingTokenRefresh = null;
         }
+        return resolvedToken;
       })();
+      return pendingTokenRefresh;
     };
 
     setAuthTokensGetter(() => {
@@ -4278,7 +4319,7 @@ if (!gotTheLock) {
         const payload = JSON.parse(Buffer.from(tokens.accessToken.split('.')[1], 'base64').toString());
         const expiresAt = payload.exp * 1000;
         if (expiresAt - Date.now() < 5 * 60 * 1000) {
-          refreshTokenAsync(); // fire-and-forget
+          void refreshOnce('proactive'); // fire-and-forget
         }
       } catch { /* unable to parse JWT, return token as-is */ }
       return tokens;
@@ -4287,29 +4328,8 @@ if (!gotTheLock) {
 
     // Wire up token refresher for the OpenAI compat proxy so it can retry
     // on 401/403 with a fresh accessToken instead of failing immediately.
-    setProxyTokenRefresher(async () => {
-      const tokens = getAuthTokens();
-      if (!tokens?.refreshToken) return null;
-      const serverBaseUrl = getServerApiBaseUrl();
-      try {
-        const resp = await net.fetch(`${serverBaseUrl}/api/auth/refresh`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refreshToken: tokens.refreshToken }),
-        });
-        if (resp.ok) {
-          const body = await resp.json() as { code: number; data: { accessToken: string; refreshToken?: string } };
-          if (body.code === 0 && body.data) {
-            saveAuthTokens(body.data.accessToken, body.data.refreshToken || tokens.refreshToken);
-            console.log('[Auth] proxy token refresh succeeded');
-            return body.data.accessToken;
-          }
-        }
-      } catch (err) {
-        console.warn('[Auth] proxy token refresh failed:', err);
-      }
-      return null;
-    });
+    // Delegates to the shared refreshOnce() to avoid concurrent refresh races.
+    setProxyTokenRefresher(() => refreshOnce('proxy'));
 
     bindCoworkRuntimeForwarder();
     bindOpenClawStatusForwarder();
