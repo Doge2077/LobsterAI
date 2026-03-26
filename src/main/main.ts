@@ -14,7 +14,7 @@ import {
 } from './libs/agentEngine';
 import { SkillManager } from './skillManager';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
-import { getCurrentApiConfig, resolveCurrentApiConfig, setStoreGetter, setAuthTokensGetter, setServerBaseUrlGetter } from './libs/claudeSettings';
+import { getCurrentApiConfig, resolveCurrentApiConfig, setStoreGetter, setAuthTokensGetter, setServerBaseUrlGetter, updateServerModelMetadata, clearServerModelMetadata } from './libs/claudeSettings';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { generateSessionTitle, probeCoworkModelReadiness } from './libs/coworkUtil';
 import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setProxyTokenRefresher } from './libs/coworkOpenAICompatProxy';
@@ -2032,9 +2032,11 @@ if (!gotTheLock) {
         }).catch(() => { /* best-effort */ });
       }
       clearAuthTokens();
+      clearServerModelMetadata();
       return { success: true };
     } catch {
       clearAuthTokens();
+      clearServerModelMetadata();
       return { success: true };
     }
   });
@@ -2083,6 +2085,8 @@ if (!gotTheLock) {
       const data = await resp.json() as { code: number; data: Array<{ modelId: string; modelName: string; provider: string; apiFormat: string; supportsImage?: boolean }> };
       console.log('[Auth:getModels] Response data:', JSON.stringify(data).slice(0, 500));
       if (data.code !== 0) return { success: false };
+      // Cache server model metadata for use in OpenClaw config sync (supportsImage, etc.)
+      updateServerModelMetadata(data.data);
       return { success: true, models: data.data };
     } catch (e) {
       console.error('[Auth:getModels] Error:', e);

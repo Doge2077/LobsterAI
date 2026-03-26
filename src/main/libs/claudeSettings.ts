@@ -74,6 +74,18 @@ export function setServerBaseUrlGetter(getter: () => string): void {
   serverBaseUrlGetter = getter;
 }
 
+// Cached server model metadata (populated when auth:getModels is called)
+// Keyed by modelId → { supportsImage }
+let serverModelMetadataCache: Map<string, { supportsImage?: boolean }> = new Map();
+
+export function updateServerModelMetadata(models: Array<{ modelId: string; supportsImage?: boolean }>): void {
+  serverModelMetadataCache = new Map(models.map(m => [m.modelId, { supportsImage: m.supportsImage }]));
+}
+
+export function clearServerModelMetadata(): void {
+  serverModelMetadataCache.clear();
+}
+
 const getStore = (): SqliteStore | null => {
   if (!storeGetter) {
     return null;
@@ -131,13 +143,15 @@ function tryLobsteraiServerFallback(modelId?: string): MatchedProvider | null {
   const effectiveModelId = modelId?.trim() || '';
   if (!effectiveModelId) return null;
   const baseURL = `${serverBaseUrl}/api/proxy/v1`;
-  console.log('[ClaudeSettings] lobsterai-server fallback activated:', { baseURL, modelId: effectiveModelId });
+  const cachedMeta = serverModelMetadataCache.get(effectiveModelId);
+  console.log('[ClaudeSettings] lobsterai-server fallback activated:', { baseURL, modelId: effectiveModelId, supportsImage: cachedMeta?.supportsImage });
   return {
     providerName: 'lobsterai-server',
-    providerConfig: { enabled: true, apiKey: tokens.accessToken, baseUrl: baseURL, apiFormat: 'openai', models: [{ id: effectiveModelId }] },
+    providerConfig: { enabled: true, apiKey: tokens.accessToken, baseUrl: baseURL, apiFormat: 'openai', models: [{ id: effectiveModelId, supportsImage: cachedMeta?.supportsImage }] },
     modelId: effectiveModelId,
     apiFormat: 'openai',
     baseURL,
+    supportsImage: cachedMeta?.supportsImage,
   };
 }
 
