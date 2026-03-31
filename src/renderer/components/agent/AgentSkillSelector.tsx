@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { i18nService } from '../../services/i18n';
+import { skillService } from '../../services/skill';
 import { CheckIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline';
 
 interface AgentSkillSelectorProps {
@@ -12,6 +13,14 @@ interface AgentSkillSelectorProps {
 const AgentSkillSelector: React.FC<AgentSkillSelectorProps> = ({ selectedSkillIds, onChange }) => {
   const skills = useSelector((state: RootState) => state.skill.skills);
   const [search, setSearch] = useState('');
+  const [i18nReady, setI18nReady] = useState(false);
+
+  // Load localized skill descriptions from marketplace API
+  useEffect(() => {
+    skillService.fetchMarketplaceSkills()
+      .then(() => setI18nReady(true))
+      .catch(() => setI18nReady(true));
+  }, []);
 
   const enabledSkills = useMemo(
     () => skills.filter((s) => s.enabled),
@@ -36,7 +45,7 @@ const AgentSkillSelector: React.FC<AgentSkillSelectorProps> = ({ selectedSkillId
 
   return (
     <div className="flex flex-col h-full">
-      <p className="text-xs dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60 mb-3">
+      <p className="text-xs text-secondary/60 mb-3">
         {i18nService.t('agentSkillsHint') || 'Select skills available to this Agent. Leave empty to use all enabled skills.'}
       </p>
       {enabledSkills.length > 5 && (
@@ -83,7 +92,9 @@ const AgentSkillSelector: React.FC<AgentSkillSelectorProps> = ({ selectedSkillId
                   </div>
                   {skill.description && (
                     <div className="text-xs text-secondary/60 truncate">
-                      {skill.description}
+                      {i18nReady
+                        ? skillService.getLocalizedSkillDescription(skill.id, skill.name, skill.description)
+                        : skill.description}
                     </div>
                   )}
                 </div>
