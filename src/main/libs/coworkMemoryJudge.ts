@@ -73,10 +73,15 @@ function getCachedLlmResult(key: string): MemoryJudgeResult | null {
     llmJudgeCache.delete(key);
     return null;
   }
+  llmJudgeCache.delete(key);
+  llmJudgeCache.set(key, cached);
   return cached.value;
 }
 
 function setCachedLlmResult(key: string, value: MemoryJudgeResult): void {
+  if (llmJudgeCache.has(key)) {
+    llmJudgeCache.delete(key);
+  }
   llmJudgeCache.set(key, { value, createdAt: Date.now() });
   while (llmJudgeCache.size > LLM_CACHE_MAX_SIZE) {
     const oldestKey = llmJudgeCache.keys().next().value;
